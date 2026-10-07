@@ -18,8 +18,9 @@ def _reserved_totals(db: Session) -> dict[int, float]:
 
 @router.get("")
 def list_inventory(db: Session = Depends(get_db)):
+    """叶料仓这一本：占用列只记叶原料，available = 账面 − 占用。半成品仓不混进来。"""
     reserved = _reserved_totals(db)
-    leaf = [
+    return [
         {
             "id": r.id, "code": r.code, "name": r.name, "unit": r.unit,
             "stock_qty": r.stock_qty,
@@ -29,30 +30,21 @@ def list_inventory(db: Session = Depends(get_db)):
         }
         for r in db.scalars(select(Ingredient).order_by(Ingredient.id)).all()
     ]
-    for s in db.scalars(select(SemiProduct).order_by(SemiProduct.id)).all():
-        leaf.append({
-            "id": s.id, "code": s.code, "name": s.name, "unit": s.unit,
-            "stock_qty": s.stock_qty,
-            "reserved_qty": round(reserved.get(s.id, 0.0), 3),
-            "available_qty": round(float(s.stock_qty) - reserved.get(s.id, 0.0), 3),
-            "kind": "semi",
-        })
-    return leaf
 
 
 @router.get("/semi")
 def list_semi(db: Session = Depends(get_db)):
-    reserved = _reserved_totals(db)
-    out = []
-    for r in db.scalars(select(SemiProduct).order_by(SemiProduct.id)).all():
-        hold = round(reserved.get(r.id, 0.0), 3)
-        out.append({
+    """半成品仓独立一本：备料占用永远落不到这本账上，占用恒为 0。"""
+    return [
+        {
             "id": r.id, "code": r.code, "name": r.name, "unit": r.unit,
             "stock_qty": r.stock_qty,
-            "reserved_qty": hold,
-            "available_qty": round(float(r.stock_qty) - hold, 3),
-        })
-    return out
+            "reserved_qty": 0.0,
+            "available_qty": r.stock_qty,
+            "kind": "semi",
+        }
+        for r in db.scalars(select(SemiProduct).order_by(SemiProduct.id)).all()
+    ]
 
 
 class AdjustIn(BaseModel):

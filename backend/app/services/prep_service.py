@@ -24,7 +24,6 @@ from app.models.models import (
     PrepReservation,
     PrepRun,
     SemiBomLine,
-    SemiProduct,
 )
 from app.services.bom_engine import (
     BomStructureError,
@@ -87,43 +86,6 @@ def generate_prep_run(db: Session, order_id: int) -> tuple[PrepRun, dict]:
         raise HTTPException(500, str(exc))
 
     result = result_to_dict(lines)
-    semis = {s.id: s for s in db.scalars(select(SemiProduct)).all()}
-    for b in dish_semi:
-        s = semis.get(b["semi_id"])
-        if s is None:
-            continue
-        qty = sum(
-            ol["portions"] * b["qty_per_portion"]
-            for ol in order_lines if ol["dish_id"] == b["dish_id"]
-        )
-        if qty <= 0:
-            continue
-        stock = round(float(s.stock_qty), 3)
-        row = {
-            "ingredient_id": s.id,
-            "ingredient_code": s.code,
-            "ingredient_name": s.name,
-            "unit": s.unit or "kg",
-            "need_qty": round(qty, 3),
-            "stock_qty": stock,
-            "reserved_qty": round(min(qty, stock), 3),
-            "available_qty": round(max(0.0, stock - qty), 3),
-            "shortage": round(max(0.0, qty - stock), 3),
-        }
-        result.setdefault("prep_lines", []).append(row)
-        if row["shortage"] > 0:
-            result.setdefault("shortages", []).append(dict(row))
-        s.stock_qty = round(stock - min(qty, stock), 3)
-    result["stats"] = {
-        "ingredient_count": len(result.get("prep_lines", [])),
-        "shortage_count": len(result.get("shortages", [])),
-        "total_shortage_qty": round(
-            sum(float(x.get("shortage", 0)) for x in result.get("shortages", [])), 3
-        ),
-        "total_reserved_qty": round(
-            sum(float(x.get("reserved_qty", 0)) for x in result.get("prep_lines", [])), 3
-        ),
-    }
     result["order"] = {"id": order.id, "code": order.code, "outlet": order.outlet}
 
     run = PrepRun(order_id=order_id, created_at=datetime.utcnow(),
@@ -131,6 +93,9 @@ def generate_prep_run(db: Session, order_id: int) -> tuple[PrepRun, dict]:
     db.add(run)
     db.flush()
 
+    # 幂等重写：先清掉本单旧占用行，再按本次结果写回。连点生成不会叠吃，
+    # 也不会撞 (order_id, ingredient_id) 唯一约束。
+    db.execute(delete(PrepReservation).where(PrepReservation.order_id == order_id))
     for line in lines:
         if line.reserved_qty > 0:
             db.add(PrepReservation(order_id=order_id, ingredient_id=line.ingredient_id,

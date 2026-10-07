@@ -8,23 +8,33 @@ const data = ref<any>(null)
 const shortages = ref<any[]>([])
 const orders = ref<any[]>([])
 const error = ref('')
+const generating = ref(false)
+
+async function refreshShortages() {
+  const res = await api('/prep/shortages?order_id=1')
+  shortages.value = res.shortages || []
+}
 
 async function run() {
   error.value = ''
+  generating.value = true
   try {
     data.value = await api('/prep/run?order_id=1', { method: 'POST' })
-    const res = await api('/prep/shortages?order_id=1')
-    shortages.value = res.shortages || []
+    await refreshShortages()
   } catch (e) {
     // 生成失败已整次回滚：备料单/缺料贴保持失败前内容。
     error.value = '生成失败，三套账已退回失败前：' + errText(e)
+  } finally {
+    generating.value = false
   }
 }
 
 onMounted(async () => {
   tree.value = await api('/bom/tree')
   orders.value = await api('/orders')
-  await run()
+  // 打开页面只读最新一张单，不自动生成；生成是点「生成备料单」的动作。
+  data.value = await api('/prep/latest?order_id=1')
+  await refreshShortages()
 })
 </script>
 
@@ -36,8 +46,7 @@ onMounted(async () => {
       {{ o.code }} · {{ o.outlet }}
     </span>
   </div>
-  <button class="btn" @click="run">生成备料单</button>
-  <p v-if="data && (data.has_semi_rows || (data.prep_lines||[]).some(l => (l.ingredient_name||'').includes('卤')))" class="hint">单内含半成品行</p>
+  <button class="btn" :disabled="generating" @click="run">{{ generating ? '生成中…' : '生成备料单' }}</button>
   <div v-if="error" class="kp-error">{{ error }}</div>
   <div class="kp-workbench" style="margin-top:0.85rem">
     <aside class="kp-bom-tree">
