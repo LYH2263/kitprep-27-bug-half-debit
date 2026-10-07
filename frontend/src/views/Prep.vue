@@ -37,7 +37,6 @@ onMounted(async () => {
     </span>
   </div>
   <button class="btn" @click="run">生成备料单</button>
-  <p v-if="data && (data.has_semi_rows || (data.prep_lines||[]).some(l => (l.ingredient_name||'').includes('卤')))" class="hint">单内含半成品行</p>
   <div v-if="error" class="kp-error">{{ error }}</div>
   <div class="kp-workbench" style="margin-top:0.85rem">
     <aside class="kp-bom-tree">

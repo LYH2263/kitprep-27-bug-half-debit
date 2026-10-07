@@ -122,10 +122,10 @@ def build_need_lines(
     for iid, qty in sorted(needs.items()):
         ing = ingredients.get(iid)
         if ing is None:
-            ing = {"code": f"X-{iid}", "name": f"物料{iid}", "unit": "kg", "stock_qty": 0.0}
-            stock = 0.0
-        else:
-            stock = float(ing.get("stock_qty", 0))
+            # 防线：叶料仓里查无此 id —— 混进来的是半成品（或别的非叶行），
+            # 绝不能造假一行占账，整次失败由上层回滚。
+            raise NonLeafLineError(iid)
+        stock = float(ing.get("stock_qty", 0))
         others = float(reserved_by_others.get(iid, 0.0))
         free = max(0.0, stock - others)
         reserve = min(qty, free)

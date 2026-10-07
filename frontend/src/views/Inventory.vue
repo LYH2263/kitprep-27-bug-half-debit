@@ -84,4 +84,3 @@ onMounted(reload)
     </table>
   </div>
 </template>
-<!-- leaf+semi mixed table -->

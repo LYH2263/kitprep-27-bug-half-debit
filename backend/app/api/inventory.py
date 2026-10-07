@@ -9,6 +9,7 @@ router = APIRouter(prefix="/inventory", tags=["inventory"])
 
 
 def _reserved_totals(db: Session) -> dict[int, float]:
+    """备料占用列只记叶原料，汇总结果只能对叶料仓口径使用。"""
     rows = db.execute(
         select(PrepReservation.ingredient_id, func.coalesce(func.sum(PrepReservation.qty), 0.0))
         .group_by(PrepReservation.ingredient_id)
@@ -18,8 +19,10 @@ def _reserved_totals(db: Session) -> dict[int, float]:
 
 @router.get("")
 def list_inventory(db: Session = Depends(get_db)):
+    """叶料仓一本账：账面 + 备料占用列。半成品不混在这里（id 各算各的，
+    混表会把叶料占用错套到同 id 的半成品行上）。"""
     reserved = _reserved_totals(db)
-    leaf = [
+    return [
         {
             "id": r.id, "code": r.code, "name": r.name, "unit": r.unit,
             "stock_qty": r.stock_qty,
@@ -29,28 +32,19 @@ def list_inventory(db: Session = Depends(get_db)):
         }
         for r in db.scalars(select(Ingredient).order_by(Ingredient.id)).all()
     ]
-    for s in db.scalars(select(SemiProduct).order_by(SemiProduct.id)).all():
-        leaf.append({
-            "id": s.id, "code": s.code, "name": s.name, "unit": s.unit,
-            "stock_qty": s.stock_qty,
-            "reserved_qty": round(reserved.get(s.id, 0.0), 3),
-            "available_qty": round(float(s.stock_qty) - reserved.get(s.id, 0.0), 3),
-            "kind": "semi",
-        })
-    return leaf
 
 
 @router.get("/semi")
 def list_semi(db: Session = Depends(get_db)):
-    reserved = _reserved_totals(db)
+    """半成品仓一本账：备料生成永不占半成品、永不写这本账，
+    所以占用恒为 0、可用即账面；不拿叶料占用列来对这本账。"""
     out = []
     for r in db.scalars(select(SemiProduct).order_by(SemiProduct.id)).all():
-        hold = round(reserved.get(r.id, 0.0), 3)
         out.append({
             "id": r.id, "code": r.code, "name": r.name, "unit": r.unit,
             "stock_qty": r.stock_qty,
-            "reserved_qty": hold,
-            "available_qty": round(float(r.stock_qty) - hold, 3),
+            "reserved_qty": 0.0,
+            "available_qty": round(float(r.stock_qty), 3),
         })
     return out
 

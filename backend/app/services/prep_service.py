@@ -4,11 +4,13 @@
   - 成功：备料单/缺料贴只含叶原料，占用只写叶料仓的占用列；
     叶料仓账面、半成品仓账面都不被这次生成改小（根本不写）。
   - 失败（下层为空/成环/出现非叶行）：整次回滚，三套账全部退回失败前。
-  - 同一订单重复生成：按订单幂等重写占用，不会重复吃叶料。
+  - 同一订单重复生成：按订单幂等重写占用（先删本单旧占用再落新占用），
+    不会重复吃叶料；历史备料单只追加新单，从不改写旧单的字。
 """
 from __future__ import annotations
 
 import json
+import threading
 from datetime import datetime
 
 from fastapi import HTTPException
@@ -24,7 +26,6 @@ from app.models.models import (
     PrepReservation,
     PrepRun,
     SemiBomLine,
-    SemiProduct,
 )
 from app.services.bom_engine import (
     BomStructureError,
@@ -34,9 +35,28 @@ from app.services.bom_engine import (
     result_to_dict,
 )
 
+# 同一订单并发生成在进程内串行化：连点生成时后到的等先到的落完，
+# 再按幂等重写，而不是各读一版旧占用叠着吃。
+_order_locks: dict[int, threading.Lock] = {}
+_order_locks_guard = threading.Lock()
+
+
+def _lock_for_order(order_id: int) -> threading.Lock:
+    with _order_locks_guard:
+        lk = _order_locks.get(order_id)
+        if lk is None:
+            lk = threading.Lock()
+            _order_locks[order_id] = lk
+        return lk
+
 
 def generate_prep_run(db: Session, order_id: int) -> tuple[PrepRun, dict]:
-    # 锁订单行：同一订单并发生成串行化，后到的看到先到的占用重写结果。
+    with _lock_for_order(order_id):
+        return _generate_prep_run_locked(db, order_id)
+
+
+def _generate_prep_run_locked(db: Session, order_id: int) -> tuple[PrepRun, dict]:
+    # 锁订单行：数据库层把同一订单的并发生成串行化，后到的看到先到的重写结果。
     order = db.scalars(
         select(KitchenOrder).where(KitchenOrder.id == order_id).with_for_update()
     ).first()
@@ -87,50 +107,17 @@ def generate_prep_run(db: Session, order_id: int) -> tuple[PrepRun, dict]:
         raise HTTPException(500, str(exc))
 
     result = result_to_dict(lines)
-    semis = {s.id: s for s in db.scalars(select(SemiProduct)).all()}
-    for b in dish_semi:
-        s = semis.get(b["semi_id"])
-        if s is None:
-            continue
-        qty = sum(
-            ol["portions"] * b["qty_per_portion"]
-            for ol in order_lines if ol["dish_id"] == b["dish_id"]
-        )
-        if qty <= 0:
-            continue
-        stock = round(float(s.stock_qty), 3)
-        row = {
-            "ingredient_id": s.id,
-            "ingredient_code": s.code,
-            "ingredient_name": s.name,
-            "unit": s.unit or "kg",
-            "need_qty": round(qty, 3),
-            "stock_qty": stock,
-            "reserved_qty": round(min(qty, stock), 3),
-            "available_qty": round(max(0.0, stock - qty), 3),
-            "shortage": round(max(0.0, qty - stock), 3),
-        }
-        result.setdefault("prep_lines", []).append(row)
-        if row["shortage"] > 0:
-            result.setdefault("shortages", []).append(dict(row))
-        s.stock_qty = round(stock - min(qty, stock), 3)
-    result["stats"] = {
-        "ingredient_count": len(result.get("prep_lines", [])),
-        "shortage_count": len(result.get("shortages", [])),
-        "total_shortage_qty": round(
-            sum(float(x.get("shortage", 0)) for x in result.get("shortages", [])), 3
-        ),
-        "total_reserved_qty": round(
-            sum(float(x.get("reserved_qty", 0)) for x in result.get("prep_lines", [])), 3
-        ),
-    }
     result["order"] = {"id": order.id, "code": order.code, "outlet": order.outlet}
 
+    # 历史单只追加、不改字：每次生成都落一张新 PrepRun。
     run = PrepRun(order_id=order_id, created_at=datetime.utcnow(),
                   result_json=json.dumps(result, ensure_ascii=False))
     db.add(run)
     db.flush()
 
+    # 幂等重写本单占用：先清本单旧占用，再按本次叶料结果落新占用 ——
+    # 连点两次是同一批行而不是两批叠吃；两本仓账面自始至终不写。
+    db.execute(delete(PrepReservation).where(PrepReservation.order_id == order_id))
     for line in lines:
         if line.reserved_qty > 0:
             db.add(PrepReservation(order_id=order_id, ingredient_id=line.ingredient_id,
